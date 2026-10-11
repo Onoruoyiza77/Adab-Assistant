@@ -1,0 +1,77 @@
+name: Make lecture video
+
+on:
+  push:
+    paths:
+      - "notes/**"
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "Notes file path, e.g. notes/lecture1.pdf"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          pip install -r requirements.txt
+
+      - name: Pick notes files
+        id: pick
+        env:
+          INPUT_FILE: ${{ github.event.inputs.file }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -n "$INPUT_FILE" ]; then
+            FILES="$INPUT_FILE"
+          else
+            FILES=$(git diff --name-only --diff-filter=AM "$BEFORE" "$GITHUB_SHA" -- notes/ 2>/dev/null | grep -Ei '\.(pdf|txt)$' || true)
+            if [ -z "$FILES" ]; then
+              FILES=$(ls notes/*.pdf notes/*.txt 2>/dev/null || true)
+            fi
+          fi
+          echo "Files to process: $FILES"
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Make videos
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FILES: ${{ steps.pick.outputs.files }}
+        run: |
+          mkdir -p out
+          echo "$FILES" | while read -r f; do
+            if [ -n "$f" ] && [ -f "$f" ]; then
+              python make_video.py "$f"
+            fi
+          done
+
+      - name: Publish to a Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ls out/*.mp4 >/dev/null 2>&1; then
+            gh release create "video-${{ github.run_number }}" out/*.mp4 \
+              --title "Lecture video ${{ github.run_number }}" \
+              --notes "Generated from your lecture notes."
+          else
+            echo "No videos were made."
+            exit 1
+          fi
