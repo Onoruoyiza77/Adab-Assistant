@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 W, H, FPS = 1280, 720, 25
 VOICE = os.getenv("TTS_VOICE", "en-US-AriaNeural")
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 MAX_SCENES = int(os.getenv("MAX_SCENES", "25"))
 
 BG = (18, 22, 38)
