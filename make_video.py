@@ -102,14 +102,56 @@ async def _synth(text: str, mp3: Path):
     return events
 
 
+PIPER_BASE = ("https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+              "en/en_US/lessac/medium/en_US-lessac-medium")
+_use_piper = os.getenv("TTS_ENGINE", "").lower() == "piper"
+
+
+def ensure_piper_voice() -> Path:
+    d = Path("voices")
+    d.mkdir(exist_ok=True)
+    for ext in (".onnx", ".onnx.json"):
+        p = d / f"en_US-lessac-medium{ext}"
+        if not p.exists():
+            r = requests.get(PIPER_BASE + ext, timeout=300)
+            r.raise_for_status()
+            p.write_bytes(r.content)
+    return d / "en_US-lessac-medium.onnx"
+
+
+def estimate_events(text: str, dur: float):
+    """Piper gives no word timings, so spread them by word length and pauses."""
+    words = text.split()
+    weights = [len(w) + (4 if w[-1] in ".!?" else 2 if w[-1] in ",;:" else 0) for w in words]
+    total = sum(weights)
+    t, events = 0.0, []
+    for w, wt in zip(words, weights):
+        events.append({"text": w, "start": t})
+        t += dur * wt / total
+    return events
+
+
+def piper_synth(text: str, mp3: Path):
+    model = ensure_piper_voice()
+    wav = mp3.with_suffix(".wav")
+    subprocess.run([sys.executable, "-m", "piper", "-m", str(model), "-f", str(wav)],
+                   input=text.encode(), check=True)
+    run(["ffmpeg", "-y", "-i", str(wav), "-q:a", "4", str(mp3)])
+    return estimate_events(text, audio_duration(mp3))
+
+
 def synth(text: str, mp3: Path):
-    for attempt in range(3):
-        try:
-            return asyncio.run(_synth(text, mp3))
-        except Exception as e:  # network hiccup: retry
-            print("TTS retry:", e)
-            time.sleep(5)
-    raise RuntimeError("TTS failed")
+    global _use_piper
+    if not _use_piper:
+        for attempt in range(2):
+            try:
+                return asyncio.run(_synth(text, mp3))
+            except Exception as e:  # blocked or network hiccup
+                print("Edge TTS problem:", str(e)[:120])
+                time.sleep(3)
+        print("Switching to Piper voice for the rest of the video.")
+        _use_piper = True
+    return piper_synth(text, mp3)
 
 
 def audio_duration(mp3: Path) -> float:
@@ -268,3 +310,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+  
