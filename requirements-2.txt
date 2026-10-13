@@ -1,0 +1,6 @@
+edge-tts>=7.0.0
+pillow
+requests
+numpy
+pypdf
+piper-tts
