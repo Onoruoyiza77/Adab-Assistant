@@ -1,4 +1,0 @@
-edge-tts>=7.0.0
-pillow
-requests
-piper-tts
