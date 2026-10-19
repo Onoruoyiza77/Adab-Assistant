@@ -1,13 +1,10 @@
 name: Make lecture video
 
 on:
-  push:
-    paths:
-      - "notes/**"
   workflow_dispatch:
     inputs:
       file:
-        description: "Notes file path, e.g. notes/lecture1.pdf"
+        description: "Path of your notes, e.g. notes/lecture1.pdf"
         required: true
 
 permissions:
@@ -19,12 +16,21 @@ jobs:
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Check the notes file exists
+        env:
+          NOTES: ${{ github.event.inputs.file }}
+        run: |
+          if [ ! -f "$NOTES" ]; then
+            echo "Could not find the file: $NOTES"
+            echo "Files in the notes folder:"
+            ls -la notes || true
+            exit 1
+          fi
 
       - name: Install tools
         run: |
@@ -33,43 +39,18 @@ jobs:
           sudo apt-get install -y fonts-comic-neue || true
           pip install -r requirements.txt
 
-      - name: Pick notes files
-        id: pick
-        env:
-          INPUT_FILE: ${{ github.event.inputs.file }}
-          BEFORE: ${{ github.event.before }}
-        run: |
-          if [ -n "$INPUT_FILE" ]; then
-            FILES="$INPUT_FILE"
-          else
-            FILES=$(git diff --name-only --diff-filter=AM "$BEFORE" "$GITHUB_SHA" -- notes/ 2>/dev/null | grep -Ei '\.(pdf|txt)$' || true)
-          fi
-          echo "Files to process: $FILES"
-          echo "files<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$FILES" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-      - name: Make videos
+      - name: Make the video
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          FILES: ${{ steps.pick.outputs.files }}
+          NOTES: ${{ github.event.inputs.file }}
         run: |
           mkdir -p out
-          echo "$FILES" | while read -r f; do
-            if [ -n "$f" ] && [ -f "$f" ]; then
-              python make_video.py "$f"
-            fi
-          done
+          python make_video.py "$NOTES"
 
       - name: Publish to a Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ls out/*.mp4 >/dev/null 2>&1; then
-            gh release create "video-${{ github.run_number }}" out/*.mp4 \
-              --title "Lecture video ${{ github.run_number }}" \
-              --notes "Taught by Professor Hoot."
-          else
-            echo "No videos were made."
-            exit 1
-          fi
+          gh release create "video-${{ github.run_number }}" out/*.mp4 \
+            --title "Lecture video ${{ github.run_number }}" \
+            --notes "Taught by Professor Hoot."
