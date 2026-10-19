@@ -450,4 +450,150 @@ def build_scene(idx, total, scene, st, work: Path) -> Path:
         wf.writeframes(samples.tobytes())
     mouth = mouth_envelope(samples, nframes)
 
-    # ---- when things app
+    # ---- when things appear ----
+    page_wipe = {}
+    seen = set()
+    for el in els:
+        start, sstart, dur = btimes[el["_beat"]]
+        pg = el["_page"]
+        if pg > 0 and pg not in seen:
+            page_wipe[pg] = start
+            el["_t0"] = start + WIPE + 0.1
+        else:
+            el["_t0"] = start + 0.2
+        seen.add(pg)
+        el["_rev"] = reveal_seconds(el, dur)
+    pages = [[e for e in els if e["_page"] == k] for k in range(npages)]
+
+    blank = blank_board()
+    head_only, _ = render_board(heading, 1.0, [], marker=False)
+    page_final = {}
+
+    def final_of(k):
+        if k not in page_final:
+            page_final[k] = render_board(heading, 1.0, [(e, 1.0) for e in pages[k]], marker=False)[0]
+        return page_final[k]
+
+    sbase = scene_base(st["base"], idx, total)
+    out = work / f"scene{idx}.mp4"
+    proc = subprocess.Popen(
+        ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
+         "-i", str(wav), "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p",
+         "-c:a", "aac", "-b:a", "128k", "-shortest", str(out)],
+        stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    cache = {"sig": None, "img": None, "my": 34}
+    tip = st["tip"]
+    board = blank
+    for f in range(nframes):
+        t = f / FPS
+        latest_t0 = -9.0
+        wiping = None
+        if t < wipe_in:
+            wiping = (st["prev_board"], blank, t / WIPE)
+            sig = ("w0", f)
+        elif t < intro:
+            hp = (t - wipe_in) / 1.0
+            sig = ("h", round(hp, 3))
+        else:
+            k = 0
+            for pg in range(1, npages):
+                if pg in page_wipe and t >= page_wipe[pg]:
+                    k = pg
+            if k > 0 and t < page_wipe[k] + WIPE:
+                wiping = (final_of(k - 1), head_only, (t - page_wipe[k]) / WIPE)
+                sig = ("wp", f)
+            else:
+                vis = [(e, clamp01((t - e["_t0"]) / e["_rev"])) for e in pages[k] if e["_t0"] <= t]
+                if vis:
+                    latest_t0 = vis[-1][0]["_t0"]
+                sig = ("p", k, tuple((id(e), round(p, 3)) for e, p in vis))
+        if wiping:
+            board = wipe_image(*wiping)
+            my = cache["my"]
+        elif cache["sig"] == sig:
+            board, my = cache["img"], cache["my"]
+        else:
+            if sig[0] == "h":
+                board, my = render_board(heading, hp, [])
+            else:
+                board, my = render_board(heading, 1.0, vis)
+            cache.update(sig=sig, img=board, my=my)
+        st["last_board"] = board
+
+        target = (BX + 12, BY + my)
+        tip = (tip[0] + (target[0] - tip[0]) * 0.28, tip[1] + (target[1] - tip[1]) * 0.28)
+        hop = 12 * math.sin(math.pi * clamp01((t - latest_t0) / 0.35)) if 0 <= t - latest_t0 < 0.35 else 0
+        look = (max(-1, min(1, (tip[0] - 170) / 200)), max(-1, min(1, (tip[1] - 360) / 200)))
+
+        frame = sbase.copy()
+        frame.paste(board, (BX, BY))
+        hand = draw_owl(frame, t, float(mouth[f]), blink_amount(t), look, tip, hop)
+        draw_pointer(frame, hand, tip)
+        for c0, c1, s in caps:
+            if c0 <= t < c1:
+                ci = caption_image(s)
+                frame.paste(ci, (60, 712 - ci.size[1]), ci)
+                break
+        proc.stdin.write(frame.tobytes())
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise RuntimeError("ffmpeg failed for scene " + str(idx))
+    st["prev_board"] = board
+    st["tip"] = tip
+    return out
+
+
+def main():
+    path = Path(sys.argv[1])
+    work = Path("work") / path.stem
+    work.mkdir(parents=True, exist_ok=True)
+    Path("out").mkdir(exist_ok=True)
+
+    print("Professor Hoot is preparing the lecture...")
+    try:
+        script = make_script(path)
+    except Exception as e:
+        notify(f"Sorry, I couldn't make this video: {e}")
+        raise
+    (work / "script.json").write_text(json.dumps(script, indent=2))
+    scenes = script["scenes"]
+    if not scenes:
+        raise RuntimeError("No scenes were written")
+    print(f"{len(scenes)} scenes, {sum(len(s['beats']) for s in scenes)} beats")
+    words = sum(len(b["say"].split()) for sc in scenes for b in sc["beats"])
+    mins = int(round(words / 135))
+    notify(f"Professor Hoot has planned your lecture: {len(scenes)} scenes, about {mins} minutes of video. "
+           "Now drawing the animation...")
+
+    st = {"base": make_base(), "prev_board": None, "tip": (BX + 12, BY + 40)}
+    clips = []
+    for i, sc in enumerate(scenes, 1):
+        t0 = time.time()
+        for attempt in range(2):
+            try:
+                clips.append(build_scene(i, len(scenes), sc, st, work))
+                break
+            except Exception as e:
+                print(f"Scene {i} problem ({e}); retrying" if attempt == 0 else "")
+                if attempt == 1:
+                    raise
+        print(f"Scene {i}/{len(scenes)} done in {time.time() - t0:.0f}s: {sc['heading']}", flush=True)
+        for pct in (25, 50, 75):
+            if i == max(1, round(len(scenes) * pct / 100)) and len(scenes) >= 8:
+                notify(f"{pct}% of the lecture is drawn...")
+
+    lst = work / "all.txt"
+    lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips))
+    final = Path("out") / f"{path.stem}.mp4"
+    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(final)],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    durs = [float(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(c)],
+        text=True).strip()) for c in clips]
+    final.with_suffix(".scenes.json").write_text(json.dumps({"title": script.get("title", ""), "durations": durs}))
+    print("Done:", final)
+
+
+if __name__ == "__main__":
+    main()
